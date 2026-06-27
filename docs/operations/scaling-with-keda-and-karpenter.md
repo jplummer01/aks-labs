@@ -13,7 +13,7 @@ In this workshop you'll learn about the Kubernetes Event-driven Autoscaler (aka 
 
 After completing this workshop, you'll be able to:
 
-- Deploy and AKS cluster with KEDA and Node Auto Provisioning (Karpenter) managed add-ons enabled
+- Deploy an AKS cluster with KEDA and Node Auto Provisioning (Karpenter) managed add-ons enabled
 - Configure a KEDA ScaledObject to drive application deployment autoscaling
 - Monitor KEDA scaling operations
 - Configure a NodeClass and Nodepool to control node auto provisioning
@@ -248,56 +248,7 @@ Instead of using the `az aks` commands with node pools, these CRDs and specs are
 
 ## Using NAP
 
-First, so far we've been running on the default Nodepool CRD that was created for us when we created the cluster. That's not ideal, as it's intended to be the 'system' pool. We should really move everything over to a new 'user' mode pool. For more on system and user pools see the AKS documentation [here](https://learn.microsoft.com/en-us/azure/aks/use-system-pools?tabs=azure-cli). However, even though the default pool is a system pool, it doesn't have a [Kubernetes taint](https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/) applied to restrict the workloads that are allowed to start on the nodepool. We can apply the appropriate taint by updating the nodepool with the Azure CLI for AKS.
-
-:::info
-In the example below, we'll taint the system pool with 'CriticalAddonsOnly=true:NoExecute'. This is a pretty aggressive way to apply a taint, as the 'NoExecute' will evict any pods that don't tolerate the taint. This was for demo purposes. In the real world you would likely use CriticalAddonsOnly=true:NoSchedule, and then migrate workloads over more gracefully. You can read more about the options in the Kubernetes documentation [here](https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/).
-:::
-
-```bash
-# First make sure your environment variables are still set
-RESOURCE_GROUP=WorkshopRG
-CLUSTER_NAME=workshopcluster
-
-# Get the default nodepool name. It should be nodepool1, but we'll confirm
-DEFAULT_NODEPOOL_NAME=$(az aks nodepool list -g $RESOURCE_GROUP --cluster-name $CLUSTER_NAME --query '[0].name' -o tsv)
-
-# Now apply the CriticalAddonsOnly taint to the default nodepool
-az aks nodepool update \
--g $RESOURCE_GROUP \
---cluster-name $CLUSTER_NAME \
--n $DEFAULT_NODEPOOL_NAME \
---node-taints CriticalAddonsOnly=true:NoExecute
-```
-
-While the above command runs, in another terminal window, you can use the following to watch the pods as they transition to the new nodes which NAP will create. The process will run as follows.
-
-1. All pet store pods will be evicted from the system nodepool, as they don't have the 'CriticalAddonsOnly' toleration
-2. Within a minute or two, NAP will start a new node with a name prefix of 'aks-default'
-3. Once started, the pet store pods will start on the new node
-
-You can monitor both the events raised by karpenter itself and the node and pod states to see NAP in action.
-
-```bash
-# Watch the events raised by karpenter
-kubectl get events -A --field-selector source=karpenter -w
-
-# watch the new node start and pods get scheduled
-watch kubectl get nodes,pods -n pets -o wide
-```
-
-It's cool to see that NAP jumped in and made sure nodes were created for us and the pods got scheduled, but it did use the default NodePool and AKSNodeClass CRDs. Let's have a look at that and see how we can create our own custom CRDs. Let's, for example, imagine that we're looking to minimize our power consumption for a new green compute policy, and move workloads to ARM based compute. Can we create a NAP NodePool CRD that prioritizes ARM compute?
-
-```bash
-# Have a look at the NodePool definitions that ship with the NAP managed add-on
-kubectl get nodepool
-kubectl describe nodepool default
-
-# Notice how the 'system-surge' nodepool uses the 'kubernetes.azure.com/mode' label to focus on system nodes.
-kubectl describe nodepool system-surge
-```
-
-Let's create our own NodePool CRD for ARM. We'll use the [weight](https://learn.microsoft.com/azure/aks/node-auto-provisioning-node-pools#node-pool-weights) parameter to give ours a higher priority than the default. You can also have a look at the [well-known labels and SKU selectors](https://learn.microsoft.com/azure/aks/node-auto-provisioning-node-pools#well-known-labels-and-sku-selectors).
+First, so far we've been running on nodes based on the default NodePool CRD that was created for us when we created the cluster. While this should be generally enough for most user cases, it's not always ideal if you have more custom or unique workload requirements. Let's create our own NodePool CRD for ARM. We'll use the [weight](https://learn.microsoft.com/azure/aks/node-auto-provisioning-node-pools#node-pool-weights) parameter to give ours a higher priority than the default. You can also have a look at the [well-known labels and SKU selectors](https://learn.microsoft.com/azure/aks/node-auto-provisioning-node-pools#well-known-labels-and-sku-selectors).
 
 ```bash
 cat <<EOF > arm-nodepool-profile.yaml
@@ -362,7 +313,11 @@ You may see a second 'aks-arm' node come online and then get removed, as NAP fig
 
 That was pretty cool, but what about that 'nodeClassRef' section of the nodepool CRD. What can we do with that? 
 
-The nodeClassRef is a reference to a [AKSNodeClass](https://learn.microsoft.com/azure/aks/node-auto-provisioning-aksnodeclass) definition, where we can define settings about the node, like the OS disk size or the OS version. Lets create our own AKSNodeClass and update the Nodepool CRD to reference this custom AKSNodeClass.
+The nodeClassRef is a reference to an [AKSNodeClass](https://learn.microsoft.com/azure/aks/node-auto-provisioning-aksnodeclass) definition, where we can define settings about the node, like the OS disk size or the OS version. Let's create our own AKSNodeClass CRD and update the Nodepool CRD to reference this custom AKSNodeClass.
+
+:::note
+You can have multiple NodePool and AKSNodeClass CRDs in the same cluster. NAP will choose the combination of NodePool/AKSNodeClass that meets your workload requirements.
+:::
 
 ```bash
 cat <<EOF > arm-nodepool-profile_v2.yaml
@@ -432,8 +387,8 @@ For more info on Karpenter logs and metrics with NAP, visit our [NAP monitoring 
 
 ## Conclusion
 
-In this lab we walked through using the [Kuberentes Event Driven Autoscaler](https://keda.sh) to drive the replica count of an application based on an external trigger. In our case, we used the queue depth of a RabbitMQ queue to increase an application's replica count. This is an extremely powerful tool in managing how your application can scale, and KEDA provides an amazing list of [scalers](https://keda.sh/docs/2.17/scalers/) that you can tap into. It's also open source, so you can add your own!
+In this lab we walked through using the [Kubernetes Event Driven Autoscaler](https://keda.sh) to drive the replica count of an application based on an external trigger. In our case, we used the queue depth of a RabbitMQ queue to increase an application's replica count. This is an extremely powerful tool in managing how your application can scale, and KEDA provides an amazing list of [scalers](https://keda.sh/docs/2.17/scalers/) that you can tap into. It's also open source, so you can add your own!
 
-Next, we took a look at the Karpenter project, and the OSS Azure Provider for Karpenter, which is provided in AKS as the managed service [Node AutoProvisioning](https://learn.microsoft.com/en-us/azure/aks/node-autoprovision?tabs=azure-cli) managed add-on. We saw how you can use the default AKSNodeClass and NodePool CRD to enable autoscaling, but also how you can create your own custom Nodepool and AKSNodeClass CRD based on your own requirements, or even deploy multiple of these CRDs based on your workload needs. In our example, we wanted to run an Azure Linux pool that used ARM based nodes.
+Next, we took a look at the Karpenter project, and the OSS Azure Provider for Karpenter, which is provided in AKS as the managed addon [Node Auto Provisioning](https://learn.microsoft.com/en-us/azure/aks/node-autoprovision?tabs=azure-cli). We saw how you can use the default AKSNodeClass and NodePool CRD to enable autoscaling, but also how you can create your own custom Nodepool and AKSNodeClass CRD based on your own requirements, or even deploy multiple of these CRDs based on your workload needs. In our example, we wanted to run an Azure Linux pool that used ARM based nodes.
 
 Using these two tools together can give you amazing control over the way your application and your cluster handle scaling, and we only scratched the surface of the potential of these solutions!
